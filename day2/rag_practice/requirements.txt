@@ -8,6 +8,7 @@ langchain-openai~=0.3.31
 langchain-community~=0.3.27
 langchain-core~=0.3.74
 langsmith
+langchainhub
 
 # 벡터 저장소 및 임베딩
 faiss-cpu

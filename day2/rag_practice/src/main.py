@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import asyncio
 import os
 import re
 from typing import List, Dict
@@ -7,11 +8,13 @@ from pathlib import Path
 import unicodedata
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import WebBaseLoader
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain import hub
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,82 +61,72 @@ class RAGSystem:
         self.max_hallucination_retries = 5
         
         self._setup_prompts()
+
+    async def load_docs_from_web(self) -> List[Document]:
+        urls = [
+            "https://lilianweng.github.io/posts/2023-06-23-agent/",
+            "https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/",
+            "https://lilianweng.github.io/posts/2023-10-25-adv-attack-llm/",
+        ]
+        loader = WebBaseLoader()
+        datas = await loader.fetch_all(urls)
+        docs = []
+        for doc in datas:
+            docs.append(Document(doc))
+
+        return docs
+
     
     def _setup_prompts(self):
-        self.answer_prompt = ChatPromptTemplate.from_template("""
-        당신은 도움이 되는 AI 어시스턴트입니다. 제공된 컨텍스트를 바탕으로 사용자의 질문에 답변해주세요.
+        # 1. RAG 답변 생성 프롬프트 - Hub에서 로드
+        try:
+            self.answer_prompt = hub.pull("rlm/rag-prompt")
+            logger.info("Hub에서 rlm/rag-prompt 로드 성공")
+        except Exception as e:
+            logger.warning(f"Hub에서 rlm/rag-prompt 로드 실패, 기본 프롬프트 사용: {e}")
+            self.answer_prompt = ChatPromptTemplate.from_template("""
+            You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.
+            
+            Question: {question}
+            Context: {context}
+            Answer:
+            """)
         
-        컨텍스트:
-        {context}
-        
-        질문: {question}
-        
-        답변할 때 다음 규칙을 따라주세요:
-        1. 제공된 컨텍스트에서만 정보를 사용하세요
-        2. 컨텍스트에 없는 정보는 추측하지 마세요
-        3. 명확하고 정확한 답변을 제공하세요
-        4. 컨텍스트가 불충분하면 그렇게 말씀해주세요
-        
-        답변:
-        """)
-        
+        # 2. 관련성 평가 프롬프트 - 영어로 통일하여 일관성 향상
         self.relevance_prompt = ChatPromptTemplate.from_template("""
-        다음 검색된 문서가 사용자의 질문과 얼마나 관련이 있는지 0-10점으로 평가해주세요.
+        Rate how relevant the following document is to the user's question on a scale of 0-10.
         
-        질문: {question}
+        Question: {question}
         
-        문서 내용:
+        Document content:
         {document}
         
-        0-3점: 전혀 관련 없음
-        4-6점: 약간 관련 있음
-        7-8점: 관련성 높음
-        9-10점: 매우 관련성 높음
+        0-3: Not relevant at all
+        4-6: Slightly relevant  
+        7-8: Highly relevant
+        9-10: Very highly relevant
         
-        점수만 숫자로 답변해주세요 (예: 7):
+        Please respond with only a number (e.g., 7):
         """)
+        logger.info("관련성 평가 프롬프트 설정 완료")
         
+        # 3. 할루시네이션 체크 프롬프트 - 영어로 통일하여 일관성 향상
         self.hallucination_check_prompt = ChatPromptTemplate.from_template("""
-        다음 답변이 제공된 컨텍스트에 근거하여 작성되었는지 확인해주세요.
+        Please verify if the following answer is based on the provided context. 
         
-        컨텍스트:
+        Context:
         {context}
         
-        답변:
+        Answer:
         {answer}
         
-        질문: {question}
+        Question: {question}
         
-        답변이 컨텍스트에 근거하여 작성되었으면 "YES", 그렇지 않거나 컨텍스트에 없는 정보를 포함했으면 "NO"로 답변해주세요.
+        If the answer is based on the context, respond with "YES". If it contains information not in the context or makes assumptions, respond with "NO".
         
-        판단 결과:
+        Verification result:
         """)
-
-    def load_documents(self, file_paths: List[str]) -> List[Document]:
-        documents = []
-        
-        for file_path in file_paths:
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-                
-                # 텍스트 정리
-                cleaned_content = clean_text(content)
-                if not cleaned_content:
-                    logger.warning(f"문서 내용이 비어있음: {file_path}")
-                    continue
-                    
-                doc = Document(
-                    page_content=cleaned_content,
-                    metadata={"source": file_path}
-                )
-                documents.append(doc)
-                logger.info(f"문서 로드됨: {file_path}")
-                
-            except Exception as e:
-                logger.error(f"문서 로드 실패 {file_path}: {e}")
-        
-        return documents
+        logger.info("할루시네이션 체크 프롬프트 설정 완료")
 
     def create_vectorstore(self, documents: List[Document]):
         text_splitter = RecursiveCharacterTextSplitter(
@@ -284,7 +277,7 @@ class RAGSystem:
             }
 
 
-def main():
+async def main():
     # OpenAI API 키 설정
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -293,58 +286,9 @@ def main():
     
     # RAG 시스템 초기화
     rag = RAGSystem(api_key)
-    
-    # 샘플 문서 생성 (실제 사용시에는 실제 문서 파일들을 사용)
-    sample_docs_dir = Path("sample_docs")
-    sample_docs_dir.mkdir(exist_ok=True)
-    
-    sample_doc1 = sample_docs_dir / "doc1.txt"
-    sample_doc2 = sample_docs_dir / "doc2.txt"
-    
-    if not sample_doc1.exists():
-        with open(sample_doc1, 'w', encoding='utf-8') as f:
-            f.write("""
-            인공지능(AI)의 발전과 응용
-            
-            인공지능은 컴퓨터 시스템이 인간의 지능적인 행동을 모방할 수 있도록 하는 기술입니다.
-            머신러닝, 딥러닝, 자연어처리 등의 기술이 포함됩니다.
-            
-            주요 응용 분야:
-            1. 자율주행 자동차
-            2. 의료 진단
-            3. 금융 서비스
-            4. 고객 서비스 챗봇
-            5. 이미지 및 음성 인식
-            
-            AI는 우리의 일상생활을 크게 변화시키고 있으며, 앞으로도 지속적인 발전이 예상됩니다.
-            """)
-    
-    if not sample_doc2.exists():
-        with open(sample_doc2, 'w', encoding='utf-8') as f:
-            f.write("""
-            머신러닝의 기본 개념
-            
-            머신러닝은 데이터로부터 패턴을 학습하여 예측이나 결정을 내리는 AI의 한 분야입니다.
-            
-            주요 유형:
-            1. 지도학습 (Supervised Learning)
-               - 레이블이 있는 데이터로 학습
-               - 분류, 회귀 문제 해결
-            
-            2. 비지도학습 (Unsupervised Learning)
-               - 레이블이 없는 데이터로 학습
-               - 클러스터링, 차원 축소
-            
-            3. 강화학습 (Reinforcement Learning)
-               - 환경과의 상호작용을 통한 학습
-               - 게임, 로봇 제어 등에 활용
-            
-            머신러닝 모델을 구축할 때는 데이터 전처리, 모델 선택, 하이퍼파라미터 튜닝이 중요합니다.
-            """)
-    
-    # 문서 로드 및 벡터 저장소 생성
-    documents = rag.load_documents([str(sample_doc1), str(sample_doc2)])
-    rag.create_vectorstore(documents)
+
+    web_docs = await rag.load_docs_from_web()
+    rag.create_vectorstore(web_docs)
     
     print("RAG 시스템이 준비되었습니다!")
     print("질문을 입력하세요 (종료하려면 'quit' 입력):")
@@ -371,4 +315,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
