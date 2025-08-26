@@ -1,0 +1,29 @@
+# 기본 LangChain 설치
+langchain~=0.3.27
+
+# OpenAI 사용시 추가 설치
+langchain-openai~=0.3.31
+
+# 기타 유용한 패키지
+langchain-community~=0.3.27
+langchain-core~=0.3.74
+langsmith
+
+# 벡터 저장소 및 임베딩
+faiss-cpu
+chromadb
+sentence-transformers
+
+# 문서 처리
+pypdf
+python-docx
+unstructured
+
+# 검증 및 평가
+rouge-score
+bert-score
+nltk
+
+# 머신러닝
+scikit-learn
+numpy
